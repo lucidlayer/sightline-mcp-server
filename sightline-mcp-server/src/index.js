@@ -10,6 +10,30 @@ const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
 const sqlite3_1 = __importDefault(require("sqlite3"));
 const uuid_1 = require("uuid");
 const jsdom_1 = require("jsdom");
+const pixelmatch_1 = __importDefault(require("pixelmatch"));
+const pngjs_1 = require("pngjs");
+const fs_1 = __importDefault(require("fs"));
+const path_1 = __importDefault(require("path"));
+const child_process_1 = require("child_process");
+const callMemoryTool = (toolName, args) => {
+    return new Promise((resolve, reject) => {
+        const cmd = `npx mcp-client call memory ${toolName} '${JSON.stringify(args)}'`;
+        (0, child_process_1.exec)(cmd, { maxBuffer: 1024 * 5000 }, (error, stdout, stderr) => {
+            if (error) {
+                console.error('Memory MCP call error:', stderr || error);
+                return reject(error);
+            }
+            try {
+                const parsed = JSON.parse(stdout);
+                resolve(parsed);
+            }
+            catch (e) {
+                console.error('Failed to parse memory MCP response:', stdout);
+                reject(e);
+            }
+        });
+    });
+};
 const db = new sqlite3_1.default.Database('sightline.db');
 db.run(`CREATE TABLE IF NOT EXISTS snapshots (
   id TEXT PRIMARY KEY,
@@ -27,6 +51,22 @@ const server = new index_js_1.Server({
 // Register tool list
 server.setRequestHandler(types_js_1.ListToolsRequestSchema, async () => ({
     tools: [
+        {
+            name: 'get_snapshot_history',
+            description: 'Retrieve the full version lineage of a snapshot by traversing hasPreviousVersion relations',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    snapshotId: { type: 'string', description: 'The ID of the snapshot to get history for' }
+                },
+                required: ['snapshotId']
+            },
+            outputSchema: {
+                type: 'array',
+                description: 'Ordered list of snapshot IDs from newest to oldest',
+                items: { type: 'string' }
+            }
+        },
         {
             name: 'take_snapshot',
             description: 'Capture screenshot, DOM, styles, and layout of a webpage',
@@ -179,6 +219,20 @@ server.setRequestHandler(types_js_1.CallToolRequestSchema, async (req) => {
             };
             const snapshotId = (0, uuid_1.v4)();
             db.run('INSERT INTO snapshots (id, data) VALUES (?, ?)', snapshotId, JSON.stringify(snapshotData));
+            // Create Snapshot entity in memory MCP
+            callMemoryTool('create_entities', {
+                entities: [
+                    {
+                        name: `Snapshot_${snapshotId}`,
+                        entityType: "DataArtifact",
+                        observations: [
+                            `Snapshot ID: ${snapshotId}`,
+                            `URL: ${url}`,
+                            `Timestamp: ${new Date().toISOString()}`
+                        ]
+                    }
+                ]
+            }).catch(console.error);
             return {
                 content: [
                     {
@@ -201,8 +255,54 @@ server.setRequestHandler(types_js_1.CallToolRequestSchema, async (req) => {
             // If it's a flat selector-text mapping, convert to nested format
             if (!('selectors' in expectedProperties) &&
                 !('textContent' in expectedProperties) &&
-                !('styles' in expectedProperties)) {
-                expectedProperties = { textContent: expectedProperties };
+                !('styles' in expectedProperties) &&
+                !('attributes' in expectedProperties)) {
+                // Check if nested per-selector format (selectors as keys with nested objects)
+                const nestedSelectors = Object.entries(expectedProperties).filter(([, val]) => typeof val === 'object' && val !== null && !Array.isArray(val));
+                if (nestedSelectors.length > 0) {
+                    // Convert nested format to normalized format
+                    const selectorsArr = [];
+                    const textContentObj = {};
+                    const stylesObj = {};
+                    const attributesObj = {};
+                    for (const [selector, rulesUnknown] of nestedSelectors) {
+                        if (typeof rulesUnknown === 'object' && rulesUnknown !== null) {
+                            const rules = rulesUnknown;
+                            if ('exists' in rules) {
+                                if (rules.exists === false) {
+                                    selectorsArr.push(`!${selector}`);
+                                }
+                                else {
+                                    selectorsArr.push(selector);
+                                }
+                            }
+                            else {
+                                selectorsArr.push(selector);
+                            }
+                            if ('text' in rules) {
+                                textContentObj[selector] = rules.text;
+                            }
+                            if ('style' in rules) {
+                                stylesObj[selector] = rules.style;
+                            }
+                            if ('attributes' in rules) {
+                                attributesObj[selector] = rules.attributes;
+                            }
+                        }
+                    }
+                    expectedProperties = {};
+                    if (selectorsArr.length > 0)
+                        expectedProperties.selectors = selectorsArr;
+                    if (Object.keys(textContentObj).length > 0)
+                        expectedProperties.textContent = textContentObj;
+                    if (Object.keys(stylesObj).length > 0)
+                        expectedProperties.styles = stylesObj;
+                    if (Object.keys(attributesObj).length > 0)
+                        expectedProperties.attributes = attributesObj;
+                }
+                else {
+                    expectedProperties = { textContent: expectedProperties };
+                }
             }
             const snapshotData = await new Promise((resolve, reject) => {
                 db.get('SELECT data FROM snapshots WHERE id = ?', snapshotId, (err, row) => {
@@ -231,7 +331,21 @@ server.setRequestHandler(types_js_1.CallToolRequestSchema, async (req) => {
             if (expectedProperties.textContent) {
                 for (const [selector, expectedText] of Object.entries(expectedProperties.textContent)) {
                     const el = doc.querySelector(selector);
-                    if (el && el.textContent?.includes(expectedText)) {
+                    const actualText = el?.textContent || '';
+                    let match = false;
+                    if (typeof expectedText === 'string' && expectedText.startsWith('/') && expectedText.endsWith('/')) {
+                        try {
+                            const regex = new RegExp(expectedText.slice(1, -1));
+                            match = regex.test(actualText);
+                        }
+                        catch {
+                            match = false;
+                        }
+                    }
+                    else if (typeof expectedText === 'string') {
+                        match = actualText.includes(expectedText);
+                    }
+                    if (match) {
                         results.push(`Text '${expectedText}' found in '${selector}'.`);
                     }
                     else {
@@ -243,8 +357,26 @@ server.setRequestHandler(types_js_1.CallToolRequestSchema, async (req) => {
             if (expectedProperties.styles) {
                 for (const [selector, styleRules] of Object.entries(expectedProperties.styles)) {
                     for (const [prop, expectedVal] of Object.entries(styleRules)) {
-                        const regex = new RegExp(`${selector}[^}]*${prop}\\s*:\\s*${expectedVal}`);
-                        if (regex.test(styles)) {
+                        const regexPattern = typeof expectedVal === 'string' && expectedVal.startsWith('/') && expectedVal.endsWith('/')
+                            ? expectedVal.slice(1, -1)
+                            : null;
+                        let match = false;
+                        const styleRegex = new RegExp(`${selector}[^}]*${prop}\\s*:\\s*([^;]+)`);
+                        const styleMatch = styles.match(styleRegex);
+                        const actualVal = styleMatch ? styleMatch[1].trim() : '';
+                        if (regexPattern) {
+                            try {
+                                const regex = new RegExp(regexPattern);
+                                match = regex.test(actualVal);
+                            }
+                            catch {
+                                match = false;
+                            }
+                        }
+                        else if (typeof expectedVal === 'string') {
+                            match = actualVal.includes(expectedVal);
+                        }
+                        if (match) {
                             results.push(`Style '${prop}: ${expectedVal}' found for '${selector}'.`);
                         }
                         else {
@@ -254,28 +386,154 @@ server.setRequestHandler(types_js_1.CallToolRequestSchema, async (req) => {
                     }
                 }
             }
+            if (expectedProperties.attributes) {
+                for (const [selector, attrRules] of Object.entries(expectedProperties.attributes)) {
+                    const el = doc.querySelector(selector);
+                    if (!el) {
+                        results.push(`Element '${selector}' NOT found for attribute check.`);
+                        allPassed = false;
+                        continue;
+                    }
+                    for (const [attr, expectedVal] of Object.entries(attrRules)) {
+                        const actualVal = el.getAttribute(attr) ?? '';
+                        let match = false;
+                        if (typeof expectedVal === 'string' && expectedVal.startsWith('/') && expectedVal.endsWith('/')) {
+                            try {
+                                const regex = new RegExp(expectedVal.slice(1, -1));
+                                match = regex.test(actualVal);
+                            }
+                            catch {
+                                match = false;
+                            }
+                        }
+                        else if (typeof expectedVal === 'string') {
+                            match = actualVal.includes(expectedVal);
+                        }
+                        if (match) {
+                            results.push(`Attribute '${attr}=${expectedVal}' found in '${selector}'.`);
+                        }
+                        else {
+                            results.push(`Attribute '${attr}=${expectedVal}' NOT found in '${selector}'. Actual: '${actualVal}'.`);
+                            allPassed = false;
+                        }
+                    }
+                }
+            }
+            // --- Begin Visual Diffing ---
+            const baselineDir = path_1.default.join(process.cwd(), 'baselines');
+            const diffDir = path_1.default.join(process.cwd(), 'diffs');
+            if (!fs_1.default.existsSync(baselineDir))
+                fs_1.default.mkdirSync(baselineDir, { recursive: true });
+            if (!fs_1.default.existsSync(diffDir))
+                fs_1.default.mkdirSync(diffDir, { recursive: true });
+            const baselinePath = path_1.default.join(baselineDir, `${snapshotId}.png`);
+            const diffPath = path_1.default.join(diffDir, `${snapshotId}.png`);
+            const newImageBuffer = Buffer.from(snapshotData.screenshot, 'base64');
+            let visualPass = true;
+            let diffPercentage = 0;
+            let diffImageBase64 = '';
+            if (!fs_1.default.existsSync(baselinePath)) {
+                fs_1.default.writeFileSync(baselinePath, newImageBuffer);
+            }
+            else {
+                const baselineBuffer = fs_1.default.readFileSync(baselinePath);
+                const baselinePNG = pngjs_1.PNG.sync.read(baselineBuffer);
+                const newPNG = pngjs_1.PNG.sync.read(newImageBuffer);
+                if (baselinePNG.width !== newPNG.width || baselinePNG.height !== newPNG.height) {
+                    visualPass = false;
+                    results.push('Screenshot dimensions differ, failing visual validation.');
+                }
+                else {
+                    const { width, height } = baselinePNG;
+                    const diffPNG = new pngjs_1.PNG({ width, height });
+                    const diffPixels = (0, pixelmatch_1.default)(baselinePNG.data, newPNG.data, diffPNG.data, width, height, { threshold: 0.1 });
+                    diffPercentage = diffPixels / (width * height);
+                    const diffBuffer = pngjs_1.PNG.sync.write(diffPNG);
+                    fs_1.default.writeFileSync(diffPath, diffBuffer);
+                    diffImageBase64 = diffBuffer.toString('base64');
+                    if (diffPercentage > 0.005) {
+                        visualPass = false;
+                        results.push(`Visual difference ${(diffPercentage * 100).toFixed(2)}% exceeds threshold, failing visual validation.`);
+                    }
+                    else {
+                        fs_1.default.writeFileSync(baselinePath, newImageBuffer);
+                    }
+                }
+            }
+            const finalPass = allPassed && visualPass;
+            // Create ValidationResult entity in memory MCP
+            callMemoryTool('create_entities', {
+                entities: [
+                    {
+                        name: `ValidationResult_${snapshotId}_${Date.now()}`,
+                        entityType: "ProcessOutcome",
+                        observations: [
+                            `Snapshot ID: ${snapshotId}`,
+                            `Timestamp: ${new Date().toISOString()}`,
+                            `Pass: ${finalPass}`,
+                            `Explanation: ${results.join('; ')}`
+                        ]
+                    }
+                ]
+            }).then(() => {
+                // Link Snapshot to ValidationResult
+                callMemoryTool('create_relations', {
+                    relations: [
+                        {
+                            from: `Snapshot_${snapshotId}`,
+                            to: `ValidationResult_${snapshotId}_${Date.now()}`,
+                            relationType: "producesValidationResult"
+                        }
+                    ]
+                }).catch(console.error);
+            }).catch(console.error);
             return {
                 content: [
                     {
                         type: 'text',
                         text: JSON.stringify({
-                            pass: allPassed,
-                            explanation: results
+                            pass: finalPass,
+                            explanation: results,
+                            visualDiff: {
+                                diffPercentage,
+                                diffImageBase64,
+                                diffPath
+                            }
                         }, null, 2)
                     }
                 ]
             };
         }
         case 'compare_snapshots': {
-            const { snapshot1, snapshot2 } = req.params.arguments;
-            const parser = new DOMParser();
-            const doc1 = parser.parseFromString(snapshot1.dom, 'text/html');
-            const doc2 = parser.parseFromString(snapshot2.dom, 'text/html');
+            const { snapshotId1, snapshotId2 } = req.params.arguments;
+            const snapshot1 = await new Promise((resolve, reject) => {
+                db.get('SELECT data FROM snapshots WHERE id = ?', snapshotId1, (err, row) => {
+                    if (err || !row)
+                        return reject(new Error('Snapshot 1 not found'));
+                    resolve(JSON.parse(row.data));
+                });
+            });
+            const snapshot2 = await new Promise((resolve, reject) => {
+                db.get('SELECT data FROM snapshots WHERE id = ?', snapshotId2, (err, row) => {
+                    if (err || !row)
+                        return reject(new Error('Snapshot 2 not found'));
+                    resolve(JSON.parse(row.data));
+                });
+            });
+            const { window: window1 } = new jsdom_1.JSDOM(snapshot1.dom);
+            const { window: window2 } = new jsdom_1.JSDOM(snapshot2.dom);
+            const doc1 = window1.document;
+            const doc2 = window2.document;
             const diff = {
                 addedElements: [],
                 removedElements: [],
                 changedText: [],
-                styleChanges: []
+                styleChanges: [],
+                visualDiff: {
+                    diffPercentage: 0,
+                    diffImageBase64: '',
+                    diffPath: ''
+                }
             };
             const allSelectors1 = new Set(Array.from(doc1.querySelectorAll('*')).map(e => e.tagName.toLowerCase()));
             const allSelectors2 = new Set(Array.from(doc2.querySelectorAll('*')).map(e => e.tagName.toLowerCase()));
@@ -339,6 +597,65 @@ server.setRequestHandler(types_js_1.CallToolRequestSchema, async (req) => {
                     }
                 }
             }
+            const baselineDir = path_1.default.join(process.cwd(), 'baselines');
+            const diffDir = path_1.default.join(process.cwd(), 'diffs');
+            if (!fs_1.default.existsSync(baselineDir))
+                fs_1.default.mkdirSync(baselineDir, { recursive: true });
+            if (!fs_1.default.existsSync(diffDir))
+                fs_1.default.mkdirSync(diffDir, { recursive: true });
+            const diffPath = path_1.default.join(diffDir, `${snapshotId1}_vs_${snapshotId2}.png`);
+            const buffer1 = Buffer.from(snapshot1.screenshot, 'base64');
+            const buffer2 = Buffer.from(snapshot2.screenshot, 'base64');
+            const png1 = pngjs_1.PNG.sync.read(buffer1);
+            const png2 = pngjs_1.PNG.sync.read(buffer2);
+            if (png1.width === png2.width && png1.height === png2.height) {
+                const { width, height } = png1;
+                const diffPNG = new pngjs_1.PNG({ width, height });
+                const diffPixels = (0, pixelmatch_1.default)(png1.data, png2.data, diffPNG.data, width, height, { threshold: 0.1 });
+                const diffPercentage = diffPixels / (width * height);
+                const diffBuffer = pngjs_1.PNG.sync.write(diffPNG);
+                fs_1.default.writeFileSync(diffPath, diffBuffer);
+                diff.visualDiff.diffPercentage = diffPercentage;
+                diff.visualDiff.diffImageBase64 = diffBuffer.toString('base64');
+                diff.visualDiff.diffPath = diffPath;
+            }
+            else {
+                diff.visualDiff.diffPercentage = 1;
+                diff.visualDiff.diffImageBase64 = '';
+                diff.visualDiff.diffPath = '';
+            }
+            // Create Diff entity in memory MCP
+            const diffId = `${snapshotId1}_vs_${snapshotId2}_${Date.now()}`;
+            callMemoryTool('create_entities', {
+                entities: [
+                    {
+                        name: `Diff_${diffId}`,
+                        entityType: "ComparisonResult",
+                        observations: [
+                            `Source Snapshot ID: ${snapshotId1}`,
+                            `Target Snapshot ID: ${snapshotId2}`,
+                            `Timestamp: ${new Date().toISOString()}`,
+                            `Added Elements: ${diff.addedElements.join(', ')}`,
+                            `Removed Elements: ${diff.removedElements.join(', ')}`
+                        ]
+                    }
+                ]
+            }).then(() => {
+                callMemoryTool('create_relations', {
+                    relations: [
+                        {
+                            from: `Diff_${diffId}`,
+                            to: `Snapshot_${snapshotId1}`,
+                            relationType: "comparesSourceSnapshot"
+                        },
+                        {
+                            from: `Diff_${diffId}`,
+                            to: `Snapshot_${snapshotId2}`,
+                            relationType: "comparesTargetSnapshot"
+                        }
+                    ]
+                }).catch(console.error);
+            }).catch(console.error);
             return {
                 content: [
                     {
@@ -372,6 +689,43 @@ server.setRequestHandler(types_js_1.CallToolRequestSchema, async (req) => {
                             message: `Element '${selector}' highlighted.`,
                             screenshot
                         }
+                    }
+                ]
+            };
+        }
+        case 'get_snapshot_history': {
+            const { snapshotId } = args;
+            const lineage = [];
+            let currentId = snapshotId;
+            while (true) {
+                lineage.push(currentId);
+                const entityName = `Snapshot_${currentId}`;
+                let nodeResult;
+                try {
+                    nodeResult = await callMemoryTool('open_nodes', { names: [entityName] });
+                }
+                catch (e) {
+                    console.error('Error calling memory.open_nodes:', e);
+                    break;
+                }
+                const entities = nodeResult?.entities || [];
+                const entity = entities.find((e) => e.name === entityName);
+                if (!entity)
+                    break;
+                const hasPrev = (nodeResult.relations || []).find((rel) => rel.from === entityName &&
+                    rel.relationType === 'hasPreviousVersion');
+                if (hasPrev && hasPrev.to.startsWith('Snapshot_')) {
+                    currentId = hasPrev.to.replace('Snapshot_', '');
+                }
+                else {
+                    break;
+                }
+            }
+            return {
+                content: [
+                    {
+                        type: 'json',
+                        json: lineage
                     }
                 ]
             };
