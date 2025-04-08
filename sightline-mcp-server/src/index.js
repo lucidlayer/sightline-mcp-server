@@ -9,6 +9,7 @@ const stdio_js_1 = require("@modelcontextprotocol/sdk/server/stdio.js");
 const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
 const sqlite3_1 = __importDefault(require("sqlite3"));
 const uuid_1 = require("uuid");
+const jsdom_1 = require("jsdom");
 const db = new sqlite3_1.default.Database('sightline.db');
 db.run(`CREATE TABLE IF NOT EXISTS snapshots (
   id TEXT PRIMARY KEY,
@@ -197,8 +198,8 @@ server.setRequestHandler(types_js_1.CallToolRequestSchema, async (req) => {
                 });
             });
             const { dom, styles } = snapshotData;
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(dom, 'text/html');
+            const { window } = new jsdom_1.JSDOM(dom);
+            const doc = window.document;
             const results = [];
             let allPassed = true;
             if (expectedProperties.selectors) {

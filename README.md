@@ -41,7 +41,7 @@ Verify the server's response in the terminal or Cline interface.
 Take a snapshot of https://example.com, then validate that the page contains the text 'Example Domain'. If validation fails, compare snapshots and generate a markdown summary.
 
 ---
-"I just updated the homepage at https://example.com to change the headline from 'Example Domain' to 'Welcome to Sightline'.
+I just updated the homepage at https://example.com to change the headline from 'Example Domain' to 'Welcome to Sightline'.
 
 Please:
 
@@ -50,6 +50,6 @@ Validate that the headline now says 'Welcome to Sightline'.
 If validation fails, compare the new snapshot with the previous one.
 Generate a markdown summary of the differences.
 Store all snapshots and validation results persistently.
-Explain what changed and whether the fix succeeded."
+Explain what changed and whether the fix succeeded.
 
 ---

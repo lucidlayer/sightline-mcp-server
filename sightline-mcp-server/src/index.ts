@@ -10,6 +10,7 @@ import {
 
 import sqlite3 from 'sqlite3';
 import { v4 as uuidv4 } from 'uuid';
+import { JSDOM } from 'jsdom';
 
 const db = new sqlite3.Database('sightline.db');
 db.run(`CREATE TABLE IF NOT EXISTS snapshots (
@@ -215,8 +216,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
       const { dom, styles } = snapshotData;
 
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(dom, 'text/html');
+      const { window } = new JSDOM(dom);
+      const doc = window.document;
 
       const results: string[] = [];
       let allPassed = true;
