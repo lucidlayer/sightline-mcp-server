@@ -204,8 +204,16 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       };
     }
     case 'validate_fix': {
-      const { snapshot, expectedProperties } = req.params.arguments as any;
-      const { dom, styles } = snapshot;
+      const { snapshotId, expectedProperties } = req.params.arguments as any;
+
+      const snapshotData = await new Promise<any>((resolve, reject) => {
+        db.get('SELECT data FROM snapshots WHERE id = ?', snapshotId, (err, row: { data?: string } | undefined) => {
+          if (err || !row || !row.data) return reject(new Error('Snapshot not found'));
+          resolve(JSON.parse(row.data));
+        });
+      });
+
+      const { dom, styles } = snapshotData;
 
       const parser = new DOMParser();
       const doc = parser.parseFromString(dom, 'text/html');
