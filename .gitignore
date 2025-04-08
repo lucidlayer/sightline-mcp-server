@@ -35,3 +35,6 @@ coverage/
 
 # TypeScript build info
 *.tsbuildinfo
+
+# Ignore nested git snapshot repository
+snapshots-repo/
