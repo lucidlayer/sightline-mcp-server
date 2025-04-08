@@ -197,10 +197,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       return {
         content: [
           {
-            type: 'json',
-            json: {
-              snapshotId
-            }
+            type: 'text',
+            text: JSON.stringify({ snapshotId })
           }
         ]
       };

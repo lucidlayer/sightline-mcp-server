@@ -7,6 +7,13 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const index_js_1 = require("@modelcontextprotocol/sdk/server/index.js");
 const stdio_js_1 = require("@modelcontextprotocol/sdk/server/stdio.js");
 const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
+const sqlite3_1 = __importDefault(require("sqlite3"));
+const uuid_1 = require("uuid");
+const db = new sqlite3_1.default.Database('sightline.db');
+db.run(`CREATE TABLE IF NOT EXISTS snapshots (
+  id TEXT PRIMARY KEY,
+  data TEXT
+)`);
 const server = new index_js_1.Server({
     name: 'sightline-mcp-server',
     version: '0.1.0'
@@ -162,17 +169,20 @@ server.setRequestHandler(types_js_1.CallToolRequestSchema, async (req) => {
             });
             const textContent = await page.evaluate(() => document.body.innerText);
             await browser.close();
+            const snapshotData = {
+                screenshot: screenshotBuffer,
+                dom,
+                styles,
+                boundingBoxes,
+                textContent
+            };
+            const snapshotId = (0, uuid_1.v4)();
+            db.run('INSERT INTO snapshots (id, data) VALUES (?, ?)', snapshotId, JSON.stringify(snapshotData));
             return {
                 content: [
                     {
                         type: 'text',
-                        text: JSON.stringify({
-                            screenshot: screenshotBuffer,
-                            dom,
-                            styles,
-                            boundingBoxes,
-                            textContent
-                        })
+                        text: JSON.stringify({ snapshotId })
                     }
                 ]
             };

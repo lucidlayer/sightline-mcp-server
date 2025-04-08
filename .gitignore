@@ -8,6 +8,9 @@ build/
 # Documentation folder
 doc/
 
+# SQLite database
+sightline.db
+
 # Logs
 *.log
 npm-debug.log*
