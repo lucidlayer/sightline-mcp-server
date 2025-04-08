@@ -125,7 +125,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 import puppeteer from 'puppeteer';
 
-server.setRequestHandler('call_tool_request', async (req) => {
+server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const { name, arguments: args } = req.params;
   switch (name) {
     case 'take_snapshot': {
