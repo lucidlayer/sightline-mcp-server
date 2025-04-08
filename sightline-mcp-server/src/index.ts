@@ -263,11 +263,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       return {
         content: [
           {
-            type: 'json',
-            json: {
-              pass: allPassed,
-              explanation: results
-            }
+            type: 'text',
+            text: JSON.stringify(
+              {
+                pass: allPassed,
+                explanation: results
+              },
+              null,
+              2
+            )
           }
         ]
       };
