@@ -92,4 +92,7 @@ export class MCPClient {
   }
 }
 
-export const mcpClient = new MCPClient('node', ['c:/Dev/Projects/lucid-layer/sightline/sightline-mcp-server/src/index.js']);
+import * as path from 'path';
+
+const mcpServerPath = path.join(__dirname, '../../../sightline-mcp-server/dist/index.js');
+export const mcpClient = new MCPClient('node', [mcpServerPath]);
