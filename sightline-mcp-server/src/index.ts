@@ -8,6 +8,15 @@ import {
   ErrorCode
 } from '@modelcontextprotocol/sdk/types.js';
 
+import sqlite3 from 'sqlite3';
+import { v4 as uuidv4 } from 'uuid';
+
+const db = new sqlite3.Database('sightline.db');
+db.run(`CREATE TABLE IF NOT EXISTS snapshots (
+  id TEXT PRIMARY KEY,
+  data TEXT
+)`);
+
 const server = new Server(
   {
     name: 'sightline-mcp-server',
@@ -173,17 +182,25 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
       await browser.close();
 
+      const snapshotData = {
+        screenshot: screenshotBuffer,
+        dom,
+        styles,
+        boundingBoxes,
+        textContent
+      };
+
+      const snapshotId = uuidv4();
+
+      db.run('INSERT INTO snapshots (id, data) VALUES (?, ?)', snapshotId, JSON.stringify(snapshotData));
+
       return {
         content: [
           {
-            type: 'text',
-            text: JSON.stringify({
-              screenshot: screenshotBuffer,
-              dom,
-              styles,
-              boundingBoxes,
-              textContent
-            })
+            type: 'json',
+            json: {
+              snapshotId
+            }
           }
         ]
       };
