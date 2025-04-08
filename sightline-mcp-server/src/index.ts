@@ -1026,11 +1026,13 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       return {
         content: [
           {
-            type: 'json',
-            json: {
-              message: `Element '${selector}' highlighted.`,
-              screenshot
-            }
+            type: 'text',
+            text: `Element '${selector}' highlighted successfully.`
+          },
+          {
+            type: 'image',
+            data: screenshot,
+            mimeType: 'image/png'
           }
         ]
       };
