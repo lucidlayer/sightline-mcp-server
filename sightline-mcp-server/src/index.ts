@@ -205,7 +205,20 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       };
     }
     case 'validate_fix': {
-      const { snapshotId, expectedProperties } = req.params.arguments as any;
+      const { snapshotId } = req.params.arguments as any;
+      let { expectedProperties } = req.params.arguments as any;
+
+      // Fix: if expectedProperties is a flat selector-text mapping, convert to nested format
+      if (
+        expectedProperties &&
+        typeof expectedProperties === 'object' &&
+        !Array.isArray(expectedProperties) &&
+        !('selectors' in expectedProperties) &&
+        !('textContent' in expectedProperties) &&
+        !('styles' in expectedProperties)
+      ) {
+        expectedProperties = { textContent: expectedProperties };
+      }
 
       const snapshotData = await new Promise<any>((resolve, reject) => {
         db.get('SELECT data FROM snapshots WHERE id = ?', snapshotId, (err, row: { data?: string } | undefined) => {
