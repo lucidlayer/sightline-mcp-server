@@ -1,15 +1,23 @@
 # Node modules
 node_modules/
+sightline-dashboard/node_modules/
+sightline-mcp-server/node_modules/
 
 # Build output
 dist/
 build/
+sightline-dashboard/dist/
+sightline-dashboard/build/
+sightline-mcp-server/dist/
+sightline-mcp-server/build/
 
-# Documentation folder
-doc/
+# VSCode extension packages
+*.vsix
+sightline-dashboard/*.vsix
 
 # SQLite database
 sightline.db
+sightline-mcp-server/sightline.db
 
 # Logs
 *.log
@@ -20,6 +28,8 @@ yarn-error.log*
 # Environment variables
 .env
 .env.*
+sightline-dashboard/.env
+sightline-mcp-server/.env
 
 # OS files
 .DS_Store
@@ -29,12 +39,36 @@ desktop.ini
 # Editor directories
 .vscode/
 .idea/
+sightline-dashboard/.vscode/
+sightline-mcp-server/.vscode/
 
 # Test coverage
 coverage/
+sightline-dashboard/coverage/
+sightline-mcp-server/coverage/
 
 # TypeScript build info
 *.tsbuildinfo
+sightline-dashboard/*.tsbuildinfo
+sightline-mcp-server/*.tsbuildinfo
 
-# Ignore nested git snapshot repository
-snapshots-repo/
+# Ignore nested git snapshot repository contents but not the repo itself
+snapshots-repo/*
+!snapshots-repo/.git/
+
+# Ignore documentation output if any
+doc/
+docs/
+
+# Ignore temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+
+# Ignore VSCode extension packaging files
+sightline-dashboard/.vscodeignore
+
+# Ignore launch configs
+sightline-dashboard/.vscode/launch.json
+sightline-mcp-server/.vscode/launch.json

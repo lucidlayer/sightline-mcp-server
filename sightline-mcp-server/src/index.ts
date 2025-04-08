@@ -783,21 +783,41 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
       const finalPass = allPassed && visualPass;
 
-      // Create ValidationResult entity in internal graph
-      const validationEntityName = `ValidationResult_${snapshotId}_${Date.now()}`;
+      const validationId = uuidv4();
+      const validationDir = path.join(process.cwd(), 'diffs');
+      const timestamp = new Date().toISOString();
+
+      try {
+        if (diffImageBase64) {
+          fs.writeFileSync(path.join(validationDir, `${validationId}.png`), Buffer.from(diffImageBase64, 'base64'));
+        }
+        fs.writeFileSync(path.join(validationDir, `${validationId}.json`), JSON.stringify({
+          snapshotId,
+          timestamp,
+          pass: finalPass,
+          explanation: results,
+          diffPercentage,
+          diffPath
+        }, null, 2));
+      } catch (e) {
+        console.error('Error saving validation diff:', e);
+      }
+
+      const validationEntityName = `ValidationResult_${validationId}`;
       graphStore.createEntities([
         {
           name: validationEntityName,
           entityType: "ProcessOutcome",
           observations: [
+            `Validation ID: ${validationId}`,
             `Snapshot ID: ${snapshotId}`,
-            `Timestamp: ${new Date().toISOString()}`,
+            `Timestamp: ${timestamp}`,
             `Pass: ${finalPass}`,
-            `Explanation: ${results.join('; ')}`
+            `Explanation: ${results.join('; ')}`,
+            `Diff Image Path: ${path.join(validationDir, `${validationId}.png`)}`
           ]
         }
       ]);
-      // Link Snapshot to ValidationResult
       graphStore.createRelations([
         {
           from: `Snapshot_${snapshotId}`,
@@ -935,7 +955,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       if (!fs.existsSync(baselineDir)) fs.mkdirSync(baselineDir, { recursive: true });
       if (!fs.existsSync(diffDir)) fs.mkdirSync(diffDir, { recursive: true });
 
-      const diffPath = path.join(diffDir, `${snapshotId1}_vs_${snapshotId2}.png`);
+      const diffId = uuidv4();
+      const diffPath = path.join(diffDir, `${diffId}.png`);
 
       const buffer1 = Buffer.from(snapshot1.screenshot, 'base64');
       const buffer2 = Buffer.from(snapshot2.screenshot, 'base64');
@@ -966,16 +987,32 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         diff.visualDiff.diffPath = '';
       }
 
-      // Create Diff entity in internal graph
-      const diffId = `${snapshotId1}_vs_${snapshotId2}_${Date.now()}`;
+      try {
+        fs.writeFileSync(path.join(diffDir, `${diffId}.json`), JSON.stringify({
+          snapshotId1,
+          snapshotId2,
+          timestamp: new Date().toISOString(),
+          diffPercentage: diff.visualDiff.diffPercentage,
+          addedElements: diff.addedElements,
+          removedElements: diff.removedElements,
+          changedText: diff.changedText,
+          styleChanges: diff.styleChanges,
+          diffPath
+        }, null, 2));
+      } catch (e) {
+        console.error('Error saving diff metadata:', e);
+      }
+
       graphStore.createEntities([
         {
           name: `Diff_${diffId}`,
           entityType: "ComparisonResult",
           observations: [
+            `Diff ID: ${diffId}`,
             `Source Snapshot ID: ${snapshotId1}`,
             `Target Snapshot ID: ${snapshotId2}`,
             `Timestamp: ${new Date().toISOString()}`,
+            `Diff Image Path: ${diffPath}`,
             `Added Elements: ${diff.addedElements.join(', ')}`,
             `Removed Elements: ${diff.removedElements.join(', ')}`
           ]
@@ -1023,11 +1060,36 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
       await browser.close();
 
+      const highlightId = uuidv4();
+      const snapshotDir = path.join(process.cwd(), 'snapshots-repo');
+      const timestamp = new Date().toISOString();
+
+      try {
+        fs.writeFileSync(path.join(snapshotDir, `${highlightId}.png`), Buffer.from(screenshot, 'base64'));
+        fs.writeFileSync(path.join(snapshotDir, `${highlightId}.json`), JSON.stringify({ url, selector, timestamp }, null, 2));
+      } catch (e) {
+        console.error('Error saving highlight snapshot:', e);
+      }
+
+      graphStore.createEntities([
+        {
+          name: `Snapshot_${highlightId}`,
+          entityType: "DataArtifact",
+          observations: [
+            `Snapshot ID: ${highlightId}`,
+            `URL: ${url}`,
+            `Selector: ${selector}`,
+            `Timestamp: ${timestamp}`,
+            `Type: highlight`
+          ]
+        }
+      ]);
+
       return {
         content: [
           {
             type: 'text',
-            text: `Element '${selector}' highlighted successfully.`
+            text: `Element '${selector}' highlighted and saved as snapshot ${highlightId}.`
           },
           {
             type: 'image',
