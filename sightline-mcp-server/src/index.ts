@@ -176,14 +176,14 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       return {
         content: [
           {
-            type: 'json',
-            json: {
+            type: 'text',
+            text: JSON.stringify({
               screenshot: screenshotBuffer,
               dom,
               styles,
               boundingBoxes,
               textContent
-            }
+            })
           }
         ]
       };
