@@ -39,3 +39,5 @@ Verify the server's response in the terminal or Cline interface.
 
 
 
+Take a snapshot of https://example.com, then validate that the page contains the text 'Example Domain'. If validation fails, compare snapshots and generate a markdown summary.
+
