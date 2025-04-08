@@ -17,24 +17,38 @@ import fs from 'fs';
 import path from 'path';
 import { exec } from 'child_process';
 
-const callMemoryTool = (toolName: string, args: any) => {
+type MCPArgs = Record<string, unknown>;
+
+const callMemoryTool = (toolName: string, args: MCPArgs): Promise<any> => {
   return new Promise((resolve, reject) => {
     const cmd = `npx mcp-client call memory ${toolName} '${JSON.stringify(args)}'`;
     exec(cmd, { maxBuffer: 1024 * 5000 }, (error, stdout, stderr) => {
       if (error) {
-        console.error('Memory MCP call error:', stderr || error);
+        console.error(`[Memory MCP] Error calling ${toolName}:`, stderr || error);
         return reject(error);
       }
       try {
         const parsed = JSON.parse(stdout);
         resolve(parsed);
       } catch (e) {
-        console.error('Failed to parse memory MCP response:', stdout);
+        console.error(`[Memory MCP] Failed to parse response from ${toolName}:`, stdout);
         reject(e);
       }
     });
   });
 };
+
+const safeCallMemoryTool = async (toolName: string, args: MCPArgs, retries = 2): Promise<any> => {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await callMemoryTool(toolName, args);
+    } catch (err) {
+      console.error(`[Memory MCP] Attempt ${attempt + 1} failed for ${toolName}:`, err);
+      if (attempt === retries) throw err;
+    }
+  }
+};
+
 
 const db = new sqlite3.Database('sightline.db');
 db.run(`CREATE TABLE IF NOT EXISTS snapshots (
@@ -72,6 +86,57 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: 'array',
         description: 'Ordered list of snapshot IDs from newest to oldest',
         items: { type: 'string' }
+      }
+    },
+    {
+      name: 'get_validation_results',
+      description: 'Retrieve all validation results and their metadata for a given snapshot',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          snapshotId: { type: 'string', description: 'The ID of the snapshot to get validation results for' }
+        },
+        required: ['snapshotId']
+      },
+      outputSchema: {
+        type: 'array',
+        description: 'List of validation results with metadata',
+        items: {
+          type: 'object',
+          properties: {
+            validationName: { type: 'string' },
+            pass: { type: 'boolean' },
+            timestamp: { type: 'string' },
+            explanation: { type: 'string' }
+          },
+          required: ['validationName', 'pass', 'timestamp', 'explanation']
+        }
+      }
+    },
+    {
+      name: 'get_snapshot_diffs',
+      description: 'Retrieve all diffs related to a snapshot, including metadata',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          snapshotId: { type: 'string', description: 'The ID of the snapshot to get diffs for' }
+        },
+        required: ['snapshotId']
+      },
+      outputSchema: {
+        type: 'array',
+        description: 'List of diffs with metadata',
+        items: {
+          type: 'object',
+          properties: {
+            diffName: { type: 'string' },
+            timestamp: { type: 'string' },
+            summary: { type: 'string' },
+            sourceSnapshotId: { type: 'string' },
+            targetSnapshotId: { type: 'string' }
+          },
+          required: ['diffName', 'timestamp', 'summary', 'sourceSnapshotId', 'targetSnapshotId']
+        }
       }
     },
     {
@@ -235,6 +300,42 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
       db.run('INSERT INTO snapshots (id, data) VALUES (?, ?)', snapshotId, JSON.stringify(snapshotData));
 
+      const snapshotDir = path.join(process.cwd(), 'snapshots-repo');
+      const timestamp = new Date().toISOString();
+
+      try {
+        fs.writeFileSync(path.join(snapshotDir, `${snapshotId}.html`), dom);
+        fs.writeFileSync(path.join(snapshotDir, `${snapshotId}.css`), styles);
+        fs.writeFileSync(path.join(snapshotDir, `${snapshotId}.txt`), textContent);
+        fs.writeFileSync(path.join(snapshotDir, `${snapshotId}.json`), JSON.stringify({ url, timestamp, boundingBoxes }, null, 2));
+        fs.writeFileSync(path.join(snapshotDir, `${snapshotId}.png`), Buffer.from(screenshotBuffer, 'base64'));
+
+        exec(`git add .`, { cwd: snapshotDir }, (err) => {
+          if (err) console.error('Git add error:', err);
+          else {
+            exec(`git commit -m "Snapshot of ${url} at ${timestamp}"`, { cwd: snapshotDir }, (err2, stdout, stderr) => {
+              if (err2) console.error('Git commit error:', stderr || err2);
+              else {
+                const match = stdout.match(/\\b([a-f0-9]{40})\\b/);
+                const commitHash = match ? match[1] : '';
+                if (commitHash) {
+                  callMemoryTool('add_observations', {
+                    observations: [
+                      {
+                        entityName: `Snapshot_${snapshotId}`,
+                        contents: [`Git commit hash: ${commitHash}`]
+                      }
+                    ]
+                  }).catch(console.error);
+                }
+              }
+            });
+          }
+        });
+      } catch (e) {
+        console.error('Snapshot file/Git error:', e);
+      }
+
       // Create Snapshot entity in memory MCP
       callMemoryTool('create_entities', {
         entities: [
@@ -244,10 +345,42 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
             observations: [
               `Snapshot ID: ${snapshotId}`,
               `URL: ${url}`,
-              `Timestamp: ${new Date().toISOString()}`
+              `Timestamp: ${timestamp}`
             ]
           }
         ]
+      }).then(async () => {
+        try {
+          const latestResult = await callMemoryTool('search_nodes', { query: url });
+          const latestSnapshots = latestResult?.entities?.filter((e: any) =>
+            e.name.startsWith('Snapshot_') && e.name !== `Snapshot_${snapshotId}`
+          ) || [];
+          let latestSnapshotName = '';
+          let latestSnapshotTime = '';
+          for (const snap of latestSnapshots) {
+            const timeObs = snap.observations?.find((o: string) => o.startsWith('Timestamp:')) || '';
+            if (timeObs) {
+              const time = timeObs.split('Timestamp:')[1].trim();
+              if (!latestSnapshotTime || time > latestSnapshotTime) {
+                latestSnapshotTime = time;
+                latestSnapshotName = snap.name;
+              }
+            }
+          }
+          if (latestSnapshotName) {
+            await callMemoryTool('create_relations', {
+              relations: [
+                {
+                  from: `Snapshot_${snapshotId}`,
+                  to: latestSnapshotName,
+                  relationType: 'hasPreviousVersion'
+                }
+              ]
+            });
+          }
+        } catch (e) {
+          console.error('Version linking error:', e);
+        }
       }).catch(console.error);
 
       return {
@@ -791,6 +924,152 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           {
             type: 'json',
             json: lineage
+          }
+        ]
+      };
+    }
+    case 'get_validation_results': {
+      const { snapshotId } = args as { snapshotId: string };
+      const snapshotEntityName = `Snapshot_${snapshotId}`;
+      let nodeResult: any;
+      try {
+        nodeResult = await callMemoryTool('open_nodes', { names: [snapshotEntityName] });
+      } catch (e) {
+        console.error('Error calling memory.open_nodes:', e);
+        return {
+          content: [
+            {
+              type: 'json',
+              json: []
+            }
+          ]
+        };
+      }
+
+      const relations = nodeResult?.relations || [];
+      const validationResults: any[] = [];
+
+      const validationLinks = relations.filter(
+        (rel: any) =>
+          rel.from === snapshotEntityName &&
+          rel.relationType === 'producesValidationResult'
+      );
+
+      for (const rel of validationLinks) {
+        const validationName = rel.to;
+        let validationNodeResult: any;
+        try {
+          validationNodeResult = await callMemoryTool('open_nodes', { names: [validationName] });
+        } catch (e) {
+          console.error('Error fetching validation node:', e);
+          continue;
+        }
+        const entity = (validationNodeResult?.entities || []).find((e: any) => e.name === validationName);
+        if (!entity) continue;
+
+        const obs = entity.observations || [];
+        let pass = false;
+        let timestamp = '';
+        let explanation = '';
+
+        for (const ob of obs) {
+          if (ob.toLowerCase().startsWith('pass:')) {
+            pass = ob.toLowerCase().includes('true');
+          } else if (ob.toLowerCase().startsWith('timestamp:')) {
+            timestamp = ob.substring(ob.indexOf(':') + 1).trim();
+          } else if (ob.toLowerCase().startsWith('explanation:')) {
+            explanation = ob.substring(ob.indexOf(':') + 1).trim();
+          }
+        }
+
+        validationResults.push({
+          validationName,
+          pass,
+          timestamp,
+          explanation
+        });
+      }
+
+      return {
+        content: [
+          {
+            type: 'json',
+            json: validationResults
+          }
+        ]
+      };
+    }
+    case 'get_snapshot_diffs': {
+      const { snapshotId } = args as { snapshotId: string };
+      const snapshotEntityName = `Snapshot_${snapshotId}`;
+      let nodeResult: any;
+      try {
+        nodeResult = await callMemoryTool('open_nodes', { names: [snapshotEntityName] });
+      } catch (e) {
+        console.error('Error calling memory.open_nodes:', e);
+        return {
+          content: [
+            {
+              type: 'json',
+              json: []
+            }
+          ]
+        };
+      }
+
+      const relations = nodeResult?.relations || [];
+      const diffResults: any[] = [];
+
+      const diffLinks = relations.filter(
+        (rel: any) =>
+          (rel.to === snapshotEntityName &&
+            (rel.relationType === 'comparesSourceSnapshot' || rel.relationType === 'comparesTargetSnapshot'))
+      );
+
+      for (const rel of diffLinks) {
+        const diffName = rel.from;
+        let diffNodeResult: any;
+        try {
+          diffNodeResult = await callMemoryTool('open_nodes', { names: [diffName] });
+        } catch (e) {
+          console.error('Error fetching diff node:', e);
+          continue;
+        }
+        const entity = (diffNodeResult?.entities || []).find((e: any) => e.name === diffName);
+        if (!entity) continue;
+
+        const obs = entity.observations || [];
+        let timestamp = '';
+        let summary = '';
+        let sourceSnapshotId = '';
+        let targetSnapshotId = '';
+
+        for (const ob of obs) {
+          if (ob.toLowerCase().startsWith('timestamp:')) {
+            timestamp = ob.substring(ob.indexOf(':') + 1).trim();
+          } else if (ob.toLowerCase().startsWith('summary:')) {
+            summary = ob.substring(ob.indexOf(':') + 1).trim();
+          } else if (ob.toLowerCase().startsWith('source snapshot id:')) {
+            sourceSnapshotId = ob.substring(ob.indexOf(':') + 1).trim();
+          } else if (ob.toLowerCase().startsWith('target snapshot id:')) {
+            targetSnapshotId = ob.substring(ob.indexOf(':') + 1).trim();
+          }
+        }
+
+        diffResults.push({
+          diffName,
+          timestamp,
+          summary,
+          sourceSnapshotId,
+          targetSnapshotId
+        });
+      }
+
+      return {
+        content: [
+          {
+            type: 'json',
+            json: diffResults
           }
         ]
       };
