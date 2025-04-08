@@ -189,7 +189,21 @@ server.setRequestHandler(types_js_1.CallToolRequestSchema, async (req) => {
             };
         }
         case 'validate_fix': {
-            const { snapshotId, expectedProperties } = req.params.arguments;
+            const { snapshotId } = req.params.arguments;
+            let { expectedProperties } = req.params.arguments;
+            // Strict validation: expectedProperties must be a non-empty object
+            if (!expectedProperties ||
+                typeof expectedProperties !== 'object' ||
+                Array.isArray(expectedProperties) ||
+                Object.keys(expectedProperties).length === 0) {
+                throw new Error('Invalid expectedProperties: must be a non-empty object');
+            }
+            // If it's a flat selector-text mapping, convert to nested format
+            if (!('selectors' in expectedProperties) &&
+                !('textContent' in expectedProperties) &&
+                !('styles' in expectedProperties)) {
+                expectedProperties = { textContent: expectedProperties };
+            }
             const snapshotData = await new Promise((resolve, reject) => {
                 db.get('SELECT data FROM snapshots WHERE id = ?', snapshotId, (err, row) => {
                     if (err || !row || !row.data)

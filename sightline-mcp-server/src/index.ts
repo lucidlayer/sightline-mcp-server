@@ -208,11 +208,18 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const { snapshotId } = req.params.arguments as any;
       let { expectedProperties } = req.params.arguments as any;
 
-      // Fix: if expectedProperties is a flat selector-text mapping, convert to nested format
+      // Strict validation: expectedProperties must be a non-empty object
       if (
-        expectedProperties &&
-        typeof expectedProperties === 'object' &&
-        !Array.isArray(expectedProperties) &&
+        !expectedProperties ||
+        typeof expectedProperties !== 'object' ||
+        Array.isArray(expectedProperties) ||
+        Object.keys(expectedProperties).length === 0
+      ) {
+        throw new Error('Invalid expectedProperties: must be a non-empty object');
+      }
+
+      // If it's a flat selector-text mapping, convert to nested format
+      if (
         !('selectors' in expectedProperties) &&
         !('textContent' in expectedProperties) &&
         !('styles' in expectedProperties)
