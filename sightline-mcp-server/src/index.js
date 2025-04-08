@@ -15,42 +15,13 @@ const pngjs_1 = require("pngjs");
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const child_process_1 = require("child_process");
-const callMemoryTool = (toolName, args) => {
-    return new Promise((resolve, reject) => {
-        const cmd = `npx mcp-client call memory ${toolName} '${JSON.stringify(args)}'`;
-        (0, child_process_1.exec)(cmd, { maxBuffer: 1024 * 5000 }, (error, stdout, stderr) => {
-            if (error) {
-                console.error(`[Memory MCP] Error calling ${toolName}:`, stderr || error);
-                return reject(error);
-            }
-            try {
-                const parsed = JSON.parse(stdout);
-                resolve(parsed);
-            }
-            catch (e) {
-                console.error(`[Memory MCP] Failed to parse response from ${toolName}:`, stdout);
-                reject(e);
-            }
-        });
-    });
-};
-const safeCallMemoryTool = async (toolName, args, retries = 2) => {
-    for (let attempt = 0; attempt <= retries; attempt++) {
-        try {
-            return await callMemoryTool(toolName, args);
-        }
-        catch (err) {
-            console.error(`[Memory MCP] Attempt ${attempt + 1} failed for ${toolName}:`, err);
-            if (attempt === retries)
-                throw err;
-        }
-    }
-};
+const graphStore_js_1 = require("./graph/graphStore.js");
 const db = new sqlite3_1.default.Database('sightline.db');
 db.run(`CREATE TABLE IF NOT EXISTS snapshots (
   id TEXT PRIMARY KEY,
   data TEXT
 )`);
+const graphStore = new graphStore_js_1.GraphStore(db);
 const server = new index_js_1.Server({
     name: 'sightline-mcp-server',
     version: '0.1.0'
@@ -63,6 +34,121 @@ const server = new index_js_1.Server({
 // Register tool list
 server.setRequestHandler(types_js_1.ListToolsRequestSchema, async () => ({
     tools: [
+        {
+            name: 'create_entities',
+            description: 'Create entities in the internal knowledge graph',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    entities: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                name: { type: 'string' },
+                                entityType: { type: 'string' },
+                                observations: {
+                                    type: 'array',
+                                    items: { type: 'string' }
+                                }
+                            },
+                            required: ['name', 'entityType', 'observations']
+                        }
+                    }
+                },
+                required: ['entities']
+            }
+        },
+        {
+            name: 'create_relations',
+            description: 'Create relations in the internal knowledge graph',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    relations: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                from: { type: 'string' },
+                                to: { type: 'string' },
+                                relationType: { type: 'string' }
+                            },
+                            required: ['from', 'to', 'relationType']
+                        }
+                    }
+                },
+                required: ['relations']
+            }
+        },
+        {
+            name: 'add_observations',
+            description: 'Add observations to existing entities',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    observations: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                entityName: { type: 'string' },
+                                contents: {
+                                    type: 'array',
+                                    items: { type: 'string' }
+                                }
+                            },
+                            required: ['entityName', 'contents']
+                        }
+                    }
+                },
+                required: ['observations']
+            }
+        },
+        {
+            name: 'search_nodes',
+            description: 'Search entities in the internal knowledge graph',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    query: { type: 'string' }
+                },
+                required: ['query']
+            }
+        },
+        {
+            name: 'open_nodes',
+            description: 'Open entities by name in the internal knowledge graph',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    names: {
+                        type: 'array',
+                        items: { type: 'string' }
+                    }
+                },
+                required: ['names']
+            }
+        },
+        {
+            name: 'sequentialthinking',
+            description: 'Perform or update a step in a sequential reasoning chain',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    thought: { type: 'string' },
+                    nextThoughtNeeded: { type: 'boolean' },
+                    thoughtNumber: { type: 'integer' },
+                    totalThoughts: { type: 'integer' },
+                    isRevision: { type: 'boolean', default: false },
+                    revisesThought: { type: 'integer' },
+                    branchFromThought: { type: 'integer' },
+                    branchId: { type: 'string' },
+                    needsMoreThoughts: { type: 'boolean' }
+                },
+                required: ['thought', 'nextThoughtNeeded', 'thoughtNumber', 'totalThoughts']
+            }
+        },
         {
             name: 'get_snapshot_history',
             description: 'Retrieve the full version lineage of a snapshot by traversing hasPreviousVersion relations',
@@ -231,6 +317,68 @@ server.setRequestHandler(types_js_1.ListToolsRequestSchema, async () => ({
 const puppeteer_1 = __importDefault(require("puppeteer"));
 server.setRequestHandler(types_js_1.CallToolRequestSchema, async (req) => {
     const { name, arguments: args } = req.params;
+    if (name === 'create_entities') {
+        graphStore.createEntities(args.entities);
+        return { content: [{ type: 'text', text: 'Entities created' }] };
+    }
+    if (name === 'create_relations') {
+        graphStore.createRelations(args.relations);
+        return { content: [{ type: 'text', text: 'Relations created' }] };
+    }
+    if (name === 'add_observations') {
+        graphStore.addObservations(args.observations);
+        return { content: [{ type: 'text', text: 'Observations added' }] };
+    }
+    if (name === 'search_nodes') {
+        return new Promise((resolve) => {
+            graphStore.searchNodes(args.query, (results) => {
+                resolve({ content: [{ type: 'json', json: results }] });
+            });
+        });
+    }
+    if (name === 'open_nodes') {
+        return new Promise((resolve) => {
+            graphStore.openNodes(args.names, (results) => {
+                resolve({ content: [{ type: 'json', json: results }] });
+            });
+        });
+    }
+    if (name === 'sequentialthinking') {
+        const { thought, nextThoughtNeeded, thoughtNumber, totalThoughts, isRevision = false, revisesThought, branchFromThought, branchId, needsMoreThoughts } = args;
+        const entityName = `SeqThought_${branchId || 'main'}_${thoughtNumber}`;
+        const obs = [
+            `Thought: ${thought}`,
+            `NextThoughtNeeded: ${nextThoughtNeeded}`,
+            `ThoughtNumber: ${thoughtNumber}`,
+            `TotalThoughts: ${totalThoughts}`,
+            `IsRevision: ${isRevision}`,
+            `RevisesThought: ${revisesThought}`,
+            `BranchFromThought: ${branchFromThought}`,
+            `BranchId: ${branchId}`,
+            `NeedsMoreThoughts: ${needsMoreThoughts}`
+        ];
+        graphStore.createEntities([
+            {
+                name: entityName,
+                entityType: 'SequentialThought',
+                observations: obs
+            }
+        ]);
+        return {
+            content: [
+                {
+                    type: 'json',
+                    json: {
+                        thoughtNumber,
+                        totalThoughts,
+                        nextThoughtNeeded,
+                        branches: [],
+                        thoughtHistoryLength: thoughtNumber // Simplified
+                    }
+                }
+            ]
+        };
+    }
     switch (name) {
         case 'take_snapshot': {
             const { url, viewport, delay, fullPage } = args;
@@ -301,14 +449,12 @@ server.setRequestHandler(types_js_1.CallToolRequestSchema, async (req) => {
                                 const match = stdout.match(/\\b([a-f0-9]{40})\\b/);
                                 const commitHash = match ? match[1] : '';
                                 if (commitHash) {
-                                    callMemoryTool('add_observations', {
-                                        observations: [
-                                            {
-                                                entityName: `Snapshot_${snapshotId}`,
-                                                contents: [`Git commit hash: ${commitHash}`]
-                                            }
-                                        ]
-                                    }).catch(console.error);
+                                    graphStore.addObservations([
+                                        {
+                                            entityName: `Snapshot_${snapshotId}`,
+                                            contents: [`Git commit hash: ${commitHash}`]
+                                        }
+                                    ]);
                                 }
                             }
                         });
@@ -318,51 +464,42 @@ server.setRequestHandler(types_js_1.CallToolRequestSchema, async (req) => {
             catch (e) {
                 console.error('Snapshot file/Git error:', e);
             }
-            // Create Snapshot entity in memory MCP
-            callMemoryTool('create_entities', {
-                entities: [
-                    {
-                        name: `Snapshot_${snapshotId}`,
-                        entityType: "DataArtifact",
-                        observations: [
-                            `Snapshot ID: ${snapshotId}`,
-                            `URL: ${url}`,
-                            `Timestamp: ${timestamp}`
-                        ]
-                    }
-                ]
-            }).then(async () => {
-                try {
-                    const latestResult = await callMemoryTool('search_nodes', { query: url });
-                    const latestSnapshots = latestResult?.entities?.filter((e) => e.name.startsWith('Snapshot_') && e.name !== `Snapshot_${snapshotId}`) || [];
-                    let latestSnapshotName = '';
-                    let latestSnapshotTime = '';
-                    for (const snap of latestSnapshots) {
-                        const timeObs = snap.observations?.find((o) => o.startsWith('Timestamp:')) || '';
-                        if (timeObs) {
-                            const time = timeObs.split('Timestamp:')[1].trim();
-                            if (!latestSnapshotTime || time > latestSnapshotTime) {
-                                latestSnapshotTime = time;
-                                latestSnapshotName = snap.name;
-                            }
+            // Create Snapshot entity in internal graph
+            graphStore.createEntities([
+                {
+                    name: `Snapshot_${snapshotId}`,
+                    entityType: "DataArtifact",
+                    observations: [
+                        `Snapshot ID: ${snapshotId}`,
+                        `URL: ${url}`,
+                        `Timestamp: ${timestamp}`
+                    ]
+                }
+            ]);
+            graphStore.searchNodes(url, (latestSnapshots) => {
+                latestSnapshots = latestSnapshots.filter((e) => e.name.startsWith('Snapshot_') && e.name !== `Snapshot_${snapshotId}`);
+                let latestSnapshotName = '';
+                let latestSnapshotTime = '';
+                for (const snap of latestSnapshots) {
+                    const timeObs = snap.observations?.find((o) => o.startsWith('Timestamp:')) || '';
+                    if (timeObs) {
+                        const time = timeObs.split('Timestamp:')[1].trim();
+                        if (!latestSnapshotTime || time > latestSnapshotTime) {
+                            latestSnapshotTime = time;
+                            latestSnapshotName = snap.name;
                         }
                     }
-                    if (latestSnapshotName) {
-                        await callMemoryTool('create_relations', {
-                            relations: [
-                                {
-                                    from: `Snapshot_${snapshotId}`,
-                                    to: latestSnapshotName,
-                                    relationType: 'hasPreviousVersion'
-                                }
-                            ]
-                        });
-                    }
                 }
-                catch (e) {
-                    console.error('Version linking error:', e);
+                if (latestSnapshotName) {
+                    graphStore.createRelations([
+                        {
+                            from: `Snapshot_${snapshotId}`,
+                            to: latestSnapshotName,
+                            relationType: 'hasPreviousVersion'
+                        }
+                    ]);
                 }
-            }).catch(console.error);
+            });
             return {
                 content: [
                     {
@@ -591,32 +728,28 @@ server.setRequestHandler(types_js_1.CallToolRequestSchema, async (req) => {
                 }
             }
             const finalPass = allPassed && visualPass;
-            // Create ValidationResult entity in memory MCP
-            callMemoryTool('create_entities', {
-                entities: [
-                    {
-                        name: `ValidationResult_${snapshotId}_${Date.now()}`,
-                        entityType: "ProcessOutcome",
-                        observations: [
-                            `Snapshot ID: ${snapshotId}`,
-                            `Timestamp: ${new Date().toISOString()}`,
-                            `Pass: ${finalPass}`,
-                            `Explanation: ${results.join('; ')}`
-                        ]
-                    }
-                ]
-            }).then(() => {
-                // Link Snapshot to ValidationResult
-                callMemoryTool('create_relations', {
-                    relations: [
-                        {
-                            from: `Snapshot_${snapshotId}`,
-                            to: `ValidationResult_${snapshotId}_${Date.now()}`,
-                            relationType: "producesValidationResult"
-                        }
+            // Create ValidationResult entity in internal graph
+            const validationEntityName = `ValidationResult_${snapshotId}_${Date.now()}`;
+            graphStore.createEntities([
+                {
+                    name: validationEntityName,
+                    entityType: "ProcessOutcome",
+                    observations: [
+                        `Snapshot ID: ${snapshotId}`,
+                        `Timestamp: ${new Date().toISOString()}`,
+                        `Pass: ${finalPass}`,
+                        `Explanation: ${results.join('; ')}`
                     ]
-                }).catch(console.error);
-            }).catch(console.error);
+                }
+            ]);
+            // Link Snapshot to ValidationResult
+            graphStore.createRelations([
+                {
+                    from: `Snapshot_${snapshotId}`,
+                    to: validationEntityName,
+                    relationType: "producesValidationResult"
+                }
+            ]);
             return {
                 content: [
                     {
@@ -754,38 +887,33 @@ server.setRequestHandler(types_js_1.CallToolRequestSchema, async (req) => {
                 diff.visualDiff.diffImageBase64 = '';
                 diff.visualDiff.diffPath = '';
             }
-            // Create Diff entity in memory MCP
+            // Create Diff entity in internal graph
             const diffId = `${snapshotId1}_vs_${snapshotId2}_${Date.now()}`;
-            callMemoryTool('create_entities', {
-                entities: [
-                    {
-                        name: `Diff_${diffId}`,
-                        entityType: "ComparisonResult",
-                        observations: [
-                            `Source Snapshot ID: ${snapshotId1}`,
-                            `Target Snapshot ID: ${snapshotId2}`,
-                            `Timestamp: ${new Date().toISOString()}`,
-                            `Added Elements: ${diff.addedElements.join(', ')}`,
-                            `Removed Elements: ${diff.removedElements.join(', ')}`
-                        ]
-                    }
-                ]
-            }).then(() => {
-                callMemoryTool('create_relations', {
-                    relations: [
-                        {
-                            from: `Diff_${diffId}`,
-                            to: `Snapshot_${snapshotId1}`,
-                            relationType: "comparesSourceSnapshot"
-                        },
-                        {
-                            from: `Diff_${diffId}`,
-                            to: `Snapshot_${snapshotId2}`,
-                            relationType: "comparesTargetSnapshot"
-                        }
+            graphStore.createEntities([
+                {
+                    name: `Diff_${diffId}`,
+                    entityType: "ComparisonResult",
+                    observations: [
+                        `Source Snapshot ID: ${snapshotId1}`,
+                        `Target Snapshot ID: ${snapshotId2}`,
+                        `Timestamp: ${new Date().toISOString()}`,
+                        `Added Elements: ${diff.addedElements.join(', ')}`,
+                        `Removed Elements: ${diff.removedElements.join(', ')}`
                     ]
-                }).catch(console.error);
-            }).catch(console.error);
+                }
+            ]);
+            graphStore.createRelations([
+                {
+                    from: `Diff_${diffId}`,
+                    to: `Snapshot_${snapshotId1}`,
+                    relationType: "comparesSourceSnapshot"
+                },
+                {
+                    from: `Diff_${diffId}`,
+                    to: `Snapshot_${snapshotId2}`,
+                    relationType: "comparesTargetSnapshot"
+                }
+            ]);
             return {
                 content: [
                     {
@@ -832,7 +960,9 @@ server.setRequestHandler(types_js_1.CallToolRequestSchema, async (req) => {
                 const entityName = `Snapshot_${currentId}`;
                 let nodeResult;
                 try {
-                    nodeResult = await callMemoryTool('open_nodes', { names: [entityName] });
+                    nodeResult = await new Promise((resolve) => {
+                        graphStore.openNodes([entityName], (result) => resolve(result));
+                    });
                 }
                 catch (e) {
                     console.error('Error calling memory.open_nodes:', e);
@@ -865,7 +995,9 @@ server.setRequestHandler(types_js_1.CallToolRequestSchema, async (req) => {
             const snapshotEntityName = `Snapshot_${snapshotId}`;
             let nodeResult;
             try {
-                nodeResult = await callMemoryTool('open_nodes', { names: [snapshotEntityName] });
+                nodeResult = await new Promise((resolve) => {
+                    graphStore.openNodes([snapshotEntityName], (result) => resolve(result));
+                });
             }
             catch (e) {
                 console.error('Error calling memory.open_nodes:', e);
@@ -886,7 +1018,9 @@ server.setRequestHandler(types_js_1.CallToolRequestSchema, async (req) => {
                 const validationName = rel.to;
                 let validationNodeResult;
                 try {
-                    validationNodeResult = await callMemoryTool('open_nodes', { names: [validationName] });
+                    validationNodeResult = await new Promise((resolve) => {
+                        graphStore.openNodes([validationName], (result) => resolve(result));
+                    });
                 }
                 catch (e) {
                     console.error('Error fetching validation node:', e);
@@ -931,7 +1065,9 @@ server.setRequestHandler(types_js_1.CallToolRequestSchema, async (req) => {
             const snapshotEntityName = `Snapshot_${snapshotId}`;
             let nodeResult;
             try {
-                nodeResult = await callMemoryTool('open_nodes', { names: [snapshotEntityName] });
+                nodeResult = await new Promise((resolve) => {
+                    graphStore.openNodes([snapshotEntityName], (result) => resolve(result));
+                });
             }
             catch (e) {
                 console.error('Error calling memory.open_nodes:', e);
@@ -952,7 +1088,9 @@ server.setRequestHandler(types_js_1.CallToolRequestSchema, async (req) => {
                 const diffName = rel.from;
                 let diffNodeResult;
                 try {
-                    diffNodeResult = await callMemoryTool('open_nodes', { names: [diffName] });
+                    diffNodeResult = await new Promise((resolve) => {
+                        graphStore.openNodes([diffName], (result) => resolve(result));
+                    });
                 }
                 catch (e) {
                     console.error('Error fetching diff node:', e);
